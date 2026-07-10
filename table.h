@@ -5,13 +5,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define IME_CODE_LEN 6
+#define IME_CODE_LEN 16   /* fits multi-syllable pinyin phrases (concatenated) */
 #define IME_INDEX_ENTRIES (26 * 26 + 1)   /* 677 */
 
 #define IME_SCHEME_WUBI   0
 #define IME_SCHEME_PINYIN 1
 
-/* One on-disk record: fixed 12 bytes, little-endian, sorted by (code, rank). */
+/* One on-disk record: fixed (IME_CODE_LEN + 6) bytes, little-endian, sorted by
+   (code, rank). */
 typedef struct {
     char     code[IME_CODE_LEN]; /* ASCII a-z, NUL-padded */
     uint32_t pool_off;           /* byte offset into the string pool */

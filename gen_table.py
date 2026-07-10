@@ -12,19 +12,21 @@ Schemes
   wubi     Wubi 86 from `wubi86.dict.yaml`. Codes 1-4 letters. Keeps BOTH single
            hanzi AND multi-hanzi phrases (工期, 葡萄牙, ...). Ranked by descending
            weight (more common first).
-  pinyin   Full Hanyu Pinyin from `pinyin_simp.dict.yaml`. Single hanzi, single
-           syllable (1-6 letters). Ranked by descending weight.
+  pinyin   Full Hanyu Pinyin from `pinyin_simp.dict.yaml`. Keeps BOTH single
+           hanzi AND multi-hanzi phrases (你好, 中国, ...). The rime code is
+           space-separated syllables; syllables are concatenated (`ni hao` ->
+           `nihao`) so a phrase is typed with no separator. Ranked by weight.
 
 Binary `.tab` format (little-endian) - see table.h for the C mirror:
   magic     : 4 bytes  "IMET"
-  version   : u8   = 1
+  version   : u8   = 2
   scheme    : u8   0=wubi 1=pinyin
-  reserved  : u16  0
+  codeLen   : u16  fixed code width in bytes (== CODE_LEN; reader checks it)
   count     : u32  number of records
   poolBytes : u32  size of trailing UTF-8 string pool
   index     : u32[677]  lower-bound-by-two-letter-prefix index (26*26 + 1)
-  records   : count * 12 bytes, sorted ascending by (code, rank):
-                code    : char[6]  ASCII a-z, NUL-padded
+  records   : count * (codeLen + 6) bytes, sorted ascending by (code, rank):
+                code    : char[codeLen]  ASCII a-z, NUL-padded
                 poolOff : u32       byte offset into pool
                 wordLen : u8        UTF-8 byte length (1..255)
                 rank    : u8        per-code rank, 0 = best (most common)
@@ -35,9 +37,9 @@ Usage
   python3 gen_table.py --scheme wubi   --src wubi86.dict.yaml       --out wubi.tab
   python3 gen_table.py --scheme pinyin --src pinyin_simp.dict.yaml  --out pinyin.tab
 
-  --top N          keep only the N most common hanzi (0 = keep all).
-  --max-phrases N  wubi only: cap multi-hanzi phrases (0 = keep all). Single
-                   hanzi are always kept.
+  --top N          keep only the N most common words (0 = keep all).
+  --max-phrases N  cap multi-hanzi phrases (0 = keep all). Single hanzi are
+                   always kept. Applies to both schemes.
 """
 import argparse
 import os
@@ -45,11 +47,11 @@ import struct
 import sys
 
 MAGIC = b"IMET"
-VERSION = 1
+VERSION = 2                   # v2: codeLen widened to 16 (pinyin phrases)
 INDEX_ENTRIES = 26 * 26 + 1   # 677
-CODE_LEN = 6                  # fits "shuang"
-RECORD_SIZE = CODE_LEN + 4 + 1 + 1   # code[6] + poolOff(u32) + wordLen(u8) + rank(u8)
-HEADER_SIZE = 16             # magic[4]+ver[1]+scheme[1]+resv[2]+count[4]+pool[4]
+CODE_LEN = 16                 # fits multi-syllable pinyin phrases (concatenated)
+RECORD_SIZE = CODE_LEN + 4 + 1 + 1   # code[CODE_LEN] + poolOff(u32) + wordLen(u8) + rank(u8)
+HEADER_SIZE = 16             # magic[4]+ver[1]+scheme[1]+codeLen[2]+count[4]+pool[4]
 
 SCHEME_WUBI = 0
 SCHEME_PINYIN = 1
@@ -123,8 +125,11 @@ def load_wubi(path):
 
 
 def load_pinyin(path):
-    """Yield (code, char, score) from rime pinyin_simp.dict.yaml. Single hanzi,
-    single syllable. Higher weight = more common, so score = -weight."""
+    """Yield (code, word, score) from rime pinyin_simp.dict.yaml, keeping BOTH
+    single hanzi AND multi-hanzi phrases. The rime code is space-separated
+    syllables (e.g. `ni hao`); the syllables are concatenated into the lookup
+    code (`nihao`), matching the FEP's no-separator input. Higher weight = more
+    common, so score = -weight."""
     started = False
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -137,13 +142,14 @@ def load_pinyin(path):
             parts = line.split("\t")
             if len(parts) < 2:
                 continue
-            char, syl = parts[0], parts[1]
+            word, syl = parts[0], parts[1]
             weight = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
-            if len(char) != 1 or " " in syl or not is_single_hanzi(char):
+            code = syl.replace(" ", "")   # concatenate syllables
+            if not is_hanzi_word(word):
                 continue
-            if not (syl.isascii() and syl.isalpha() and 1 <= len(syl) <= CODE_LEN):
+            if not (code.isascii() and code.isalpha() and 1 <= len(code) <= CODE_LEN):
                 continue
-            yield syl, char, -weight
+            yield code, word, -weight
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +257,7 @@ def main():
 
     out = bytearray()
     out += MAGIC
-    out += struct.pack("<BBH", VERSION, scheme, 0)
+    out += struct.pack("<BBH", VERSION, scheme, CODE_LEN)   # codeLen in header
     out += struct.pack("<II", written, len(pool))
     out += struct.pack("<%dI" % INDEX_ENTRIES, *index)
     out += rec_bytes

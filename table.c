@@ -17,9 +17,9 @@
 static const char MAGIC[4] = {'I', 'M', 'E', 'T'};
 
 /* Header layout mirror (see gen_table.py):
-     magic[4] version[1] scheme[1] reserved[2] count[4] poolBytes[4]  = 16
+     magic[4] version[1] scheme[1] codeLen[2] count[4] poolBytes[4]  = 16
      index[677 * u32]
-     records[count * 12]
+     records[count * (codeLen + 6)]   code[codeLen] off[4] wordLen[1] rank[1]
      pool[poolBytes]                                                          */
 #define HDR_SIZE   16
 #define IDX_SIZE   (IME_INDEX_ENTRIES * 4)
@@ -41,6 +41,15 @@ int ime_table_open_mem(ime_table *t, const void *buf, size_t size,
         return -1;
     }
     uint8_t  scheme = b[5];
+    /* Header bytes 6-7 hold the code width the table was built with; it must
+       match IME_CODE_LEN or the fixed-width records would be misaligned. */
+    uint16_t code_len;
+    memcpy(&code_len, b + 6, 2);
+    if (code_len != IME_CODE_LEN) {
+        fprintf(stderr, "wubi-ime: %s: code width %u, expected %d "
+                "(rebuild the table)\n", name, code_len, IME_CODE_LEN);
+        return -1;
+    }
     uint32_t count, pool_bytes;
     memcpy(&count, b + 8, 4);
     memcpy(&pool_bytes, b + 12, 4);

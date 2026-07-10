@@ -3,6 +3,16 @@ DEMO: <https://asciinema.org/a/ybRjkiDkExr9qIUA>
 
 <img width="1914" height="1130" alt="image" src="https://github.com/user-attachments/assets/774bd9ba-fff7-4d1a-9385-437402f4e514" />
 
+# 用法
+
+```
+Ctrl-\ 切 En-拼
+Ctrl-@ 切En-拼-五
+
+Ctrl-\切的是@中选的中文方案
+Ctrl-空格 应该也行 没试
+```
+
 # wubi-ime
 
 A Chinese input-method **front-end processor (FEP)** for the terminal, in the
@@ -19,7 +29,7 @@ the mode:
 
 ```
 [En]  English   bytes pass straight through (default)
-[拼]  Pinyin     type a syllable, pick from paged candidates
+[拼]  Pinyin     type syllables (single char or a whole phrase), pick candidates
 [五]  Wubi 86    type a 1-4 letter code, pick a hanzi/phrase
 ```
 
@@ -30,9 +40,15 @@ When a Chinese mode is active the chosen hanzi are sent to the underlying progra
 as if you had typed them; the bar shows the code and candidates:
 
 ```
-[五] wq  1你           <- exact wubi code "wq" -> 你
-[拼] ni  1你 2拟 3尼 4呢 5泥 6妳 7妮 8腻 9妞  (1/8)
+[五] wq     1你                     <- exact wubi code "wq" -> 你
+[拼] ni     1你 2拟 3尼 4呢 5泥 ...  <- single syllable
+[拼] nihao  1你好 2拟好 ...          <- whole phrase, typed with no separator
 ```
+
+Pinyin accepts **phrases** as well as single characters: type the syllables run
+together (`nihao` → 你好, `zhongguo` → 中国, `beijing` → 北京, up to ~5–6
+syllables). Exact matches (single char and phrase alike) are ranked together by
+frequency, with longer-code extensions after.
 
 ## Build
 
