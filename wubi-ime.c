@@ -378,23 +378,66 @@ static void vim_leave_insert(void)
         switch_to(MODE_EN);
 }
 
-/* Scan a chunk of child output for vim's "-- INSERT --" mode message. Its
-   presence marks insert mode; on the rising edge we turn the IME on. Leaving
-   insert is driven by the ESC keypress (see process_input), since vim prints no
-   distinctive "left insert" token. */
+/* Scan a chunk of child output for vim's "-- INSERT --" mode message, but only
+   accept it when it is drawn on the child's BOTTOM row (child_rows(), just above
+   our IME bar) - that is where vim puts the mode message. This way the literal
+   text "-- INSERT --" appearing elsewhere (typed into a file, a commit message,
+   grep output, ...) does NOT falsely trigger insert mode.
+
+   We track the cursor row by interpreting the CSI cursor-position sequences vim
+   emits (ESC[<r>;<c>H, ESC[<r>H, ESC[H, and the 'f' variant) plus plain LF/CR
+   movement. `cur_row` persists across chunks (vim may position on one read and
+   write the message on the next). Rising edge on a bottom-row match turns the
+   IME on; leaving insert is still driven by the ESC keypress (process_input). */
+static int g_cur_row = 1;   /* best-effort tracked cursor row (1-based) */
+
 static void vim_scan(const unsigned char *buf, size_t n)
 {
     static const char NEEDLE[] = "-- INSERT --";
     static const size_t NL = sizeof(NEEDLE) - 1;
-    if (!g_vim || n < NL)
+    if (!g_vim)
         return;
-    for (size_t i = 0; i + NL <= n; i++) {
-        if (buf[i] == '-' && memcmp(buf + i, NEEDLE, NL) == 0) {
-            if (!g_vim_insert) {
+
+    int bottom = child_rows();
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = buf[i];
+
+        /* Track cursor row through CSI cursor-position sequences. */
+        if (c == 0x1B && i + 1 < n && buf[i + 1] == '[') {
+            size_t j = i + 2;
+            int row = 0, have_row = 0;
+            while (j < n && buf[j] >= '0' && buf[j] <= '9') {
+                row = row * 10 + (buf[j] - '0'); have_row = 1; j++;
+            }
+            /* CUP is ESC[H / ESC[<r>H / ESC[<r>;<c>H (and the 'f' variant): the
+               row is the FIRST parameter, so a following ';<col>' doesn't change
+               it - skip past it to the final H/f. */
+            size_t k = j;
+            if (k < n && buf[k] == ';') {
+                k++;
+                while (k < n && buf[k] >= '0' && buf[k] <= '9') k++;
+            }
+            if (k < n && (buf[k] == 'H' || buf[k] == 'f')) {
+                g_cur_row = have_row ? row : 1;   /* default row 1 for bare H */
+                i = k;
+                continue;
+            }
+            /* Other CSI (colour, etc.): skip to its final byte so its digits and
+               semicolons aren't misread as cursor moves. */
+            while (j < n && !(buf[j] >= 0x40 && buf[j] <= 0x7E))
+                j++;
+            i = (j < n) ? j : n - 1;
+            continue;
+        }
+        if (c == '\n') { g_cur_row++; continue; }
+
+        /* Needle match at the current position, on the bottom row only. */
+        if (c == '-' && i + NL <= n && memcmp(buf + i, NEEDLE, NL) == 0) {
+            if (g_cur_row == bottom && !g_vim_insert) {
                 g_vim_insert = 1;
                 vim_enter_insert();
             }
-            return;
+            i += NL - 1;
         }
     }
 }

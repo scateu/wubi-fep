@@ -106,7 +106,7 @@ Options:
 |------|--------|
 | `-s`, `--scheme SCHEME` | Which tables to load: `both` (default), `wubi`, or `pinyin`. The tables are embedded in the binary, so loading fewer schemes doesn't shrink the file — but the unloaded scheme's pages are never faulted in, so it **lowers resident memory**. A scheme not loaded is skipped by the mode toggle. |
 | `-a`, `--auto-commit` | Wubi: auto-commit a full **4-letter** code that has a single exact match, so common words need no `Space`. **Off by default** (a 4-letter code otherwise waits for you to pick with `Space`/a digit). |
-| `-V`, `--vim` | **Follow vim's insert mode.** When vim shows `-- INSERT --`, the IME turns on (your last Chinese mode); when you leave insert (`Esc`), it drops to `[En]` so `j`/`k`/`dd` work normally. Pressing `i`/`a`/`o` reprints `-- INSERT --` and switches back. Off by default. Detected purely from the `-- INSERT --` text and the `Esc` key. |
+| `-V`, `--vim` | **Follow vim's insert mode.** When vim shows `-- INSERT --` on its status line, the IME turns on and restores the Chinese mode you last used; when you leave insert (`Esc`), it drops to `[En]` so `j`/`k`/`dd` work normally. Pressing `i`/`a`/`o` reprints `-- INSERT --` and switches back. The `-- INSERT --` text is only honoured on the **bottom screen row** (the mode line), so the same text typed into a file/commit message does not falsely trigger. Off by default; detected purely from the bottom-row `-- INSERT --` and the `Esc` key. |
 | `-h`, `--help` | Show usage. |
 
 Inside tmux — launch it as the pane command:

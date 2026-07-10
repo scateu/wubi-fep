@@ -480,46 +480,103 @@ def test_esc_cancels_candidates():
 
 def test_vim_mode():
     section("--vim: follow vim insert mode")
-    # A fake 'vim': prints '-- INSERT --' on 'i', clears it on ESC.
+    import fcntl
+    import signal
+    import struct
+    import termios
+    # A fake 'vim' on a 24-row screen. On 'i' it prints '-- INSERT --' at the
+    # BOTTOM child row (row 23 = 24-1, where vim's mode message lives); on ESC it
+    # clears that row; on 'B' it prints the literal token in the BODY (row 5) to
+    # simulate the text appearing as file content (must NOT trigger).
     fake = os.path.join(HERE, ".fakevim_test.py")
     with open(fake, "w") as fh:
         fh.write(
             "import os,tty\n"
             "try: tty.setraw(0)\n"
             "except Exception: pass\n"
-            "os.write(1,b'\\r\\nnormal\\r\\n')\n"
+            "os.write(1,b'\\x1b[1;1Hnormal')\n"
             "while True:\n"
             "    try: d=os.read(0,1)\n"
             "    except OSError: break\n"
             "    if not d: break\n"
-            "    if d==b'i': os.write(1,b'-- INSERT --')\n"
-            "    elif d==b'\\x1b': os.write(1,b'\\r\\x1b[K[normal]\\r\\n')\n"
+            "    if d==b'i': os.write(1,b'\\x1b[23;1H-- INSERT --')\n"
+            "    elif d==b'B': os.write(1,b'\\x1b[5;1H-- INSERT -- in body')\n"
+            "    elif d==b'\\x1b': os.write(1,b'\\x1b[23;1H\\x1b[K')\n"
             "    else: os.write(1,d)\n")
     try:
         f = Fep(args=["--vim"], shell="/bin/sh")
+        fcntl.ioctl(f.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        os.kill(f.pid, signal.SIGWINCH)
         f.drain(0.3)
         f.send(b"python3 " + fake.encode() + b"\n", settle=0.5)
         f.drain(0.4)
-        f.send(b"i")                   # fake prints -- INSERT --
-        check("'-- INSERT --' turns IME on",
+        f.send(b"i")                   # bottom-row -- INSERT --
+        check("bottom-row '-- INSERT --' turns IME on",
               last_tag(f.drain_s()) in ("[五]", "[拼]"))
         f.send(b"\x1b")                # leave insert
         check("ESC (leaving insert) turns IME to [En]",
               last_tag(f.drain_s()) == "[En]")
-        f.send(b"i")                   # -- INSERT -- again
-        check("'-- INSERT --' again turns IME back on",
+        f.send(b"B")                   # token in the BODY, not the mode line
+        tags = re.findall(r"\[(?:En|五|拼)\]", f.drain_s())
+        check("body-text '-- INSERT --' does NOT switch (stays En)",
+              all(t == "[En]" for t in tags))
+        f.send(b"i")                   # bottom-row again
+        check("bottom-row '-- INSERT --' again turns IME back on",
               last_tag(f.drain_s()) in ("[五]", "[拼]"))
         f.send(b"\x1b"); f.drain()
         f.close()
 
-        # Without --vim, the same needle in output must NOT switch modes.
+        # Without --vim, even a bottom-row needle must NOT switch modes.
         g = Fep()                      # cat child, default (no --vim)
         g.send(b"-- INSERT --")        # echoed by cat into the stream
         tags = re.findall(r"\[(?:En|五|拼)\]", g.drain_s())
-        # no mode change => bar not redrawn to a CN tag
         check("without --vim, '-- INSERT --' does not switch",
               all(t == "[En]" for t in tags))
         g.close()
+    finally:
+        try:
+            os.remove(fake)
+        except OSError:
+            pass
+
+
+def test_vim_preserve_mode():
+    section("--vim: re-entering insert restores last-used Chinese mode")
+    import fcntl
+    import signal
+    import struct
+    import termios
+    fake = os.path.join(HERE, ".fakevim_test.py")
+    with open(fake, "w") as fh:
+        fh.write(
+            "import os,tty\n"
+            "try: tty.setraw(0)\n"
+            "except Exception: pass\n"
+            "os.write(1,b'\\x1b[1;1Hnormal')\n"
+            "while True:\n"
+            "    try: d=os.read(0,1)\n"
+            "    except OSError: break\n"
+            "    if not d: break\n"
+            "    if d==b'i': os.write(1,b'\\x1b[23;1H-- INSERT --')\n"
+            "    elif d==b'\\x1b': os.write(1,b'\\x1b[23;1H\\x1b[K')\n"
+            "    else: os.write(1,d)\n")
+    try:
+        f = Fep(args=["--vim"], shell="/bin/sh")
+        fcntl.ioctl(f.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        os.kill(f.pid, signal.SIGWINCH)
+        f.drain(0.3)
+        f.send(b"python3 " + fake.encode() + b"\n", settle=0.5)
+        f.drain(0.4)
+        f.send(b"i"); f.drain()            # insert -> default 五
+        f.send(b"\x00"); f.send(b"\x00")   # manual cycle 五->En->拼
+        check("manual cycle set 拼", last_tag(f.drain_s()) == "[拼]")
+        f.send(b"\x1b")                    # leave insert -> En
+        check("ESC -> En", last_tag(f.drain_s()) == "[En]")
+        f.send(b"i")                       # re-enter insert
+        check("re-enter restores 拼 (last used, not default 五)",
+              last_tag(f.drain_s()) == "[拼]")
+        f.send(b"\x1b"); f.drain()
+        f.close()
     finally:
         try:
             os.remove(fake)
@@ -546,6 +603,7 @@ def main():
     test_no_escape_split()
     test_esc_cancels_candidates()
     test_vim_mode()
+    test_vim_preserve_mode()
 
     print(f"\n{_pass} passed, {_fail} failed")
     return 1 if _fail else 0
