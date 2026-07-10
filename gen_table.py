@@ -2,12 +2,10 @@
 """
 Generate compact IME tables (`.tab`) for the wubi-ime FEP from rime dictionaries.
 
-This is deliberately separate from `gen_ime.py` (which targets a micro-journal
-firmware's fixed-size flash slot in the "IME4" format, GBK-restricted). Here the
-target is a UTF-8 terminal, so:
+The target is a UTF-8 terminal, so the format is deliberately simple:
   * no GBK restriction,
   * no fixed slot / 0xFF padding,
-  * a simpler record layout with an explicit rank byte.
+  * a simple record layout with an explicit rank byte.
 
 Schemes
 -------
@@ -68,7 +66,7 @@ def is_hanzi_word(s):
 
 
 # ---------------------------------------------------------------------------
-# sources (parsing mirrors gen_ime.py, minus the GBK filter)
+# sources (rime .dict.yaml parsers)
 # ---------------------------------------------------------------------------
 def load_wubi(path):
     """Yield (code, word, score) from a rime wubi86 `.dict.yaml`.

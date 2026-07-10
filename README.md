@@ -1,3 +1,5 @@
+DEMO: <https://asciinema.org/connect/3110f628-32bf-49a0-a032-aecc1ecdd752>
+
 # wubi-ime
 
 A Chinese input-method **front-end processor (FEP)** for the terminal, in the
@@ -136,7 +138,6 @@ multi-byte key chord is recognised as such and forwarded whole.)
 | `gen_embed.py` | `.tab` files → `tables_embed.c` (byte arrays baked into the binary) |
 | `wubi86.dict.yaml` | rime Wubi 86 source dictionary (input to `gen_table.py`) |
 | `pinyin_simp.dict.yaml` | rime simplified-Pinyin source dictionary |
-| `gen_ime.py` | **unrelated** reference: a different project's firmware-flash IME table generator (GBK, fixed slot). Not used by the FEP. |
 
 ### Regenerating / trimming tables
 
