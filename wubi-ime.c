@@ -13,6 +13,12 @@
  *
  * Build: see Makefile.  Tables: wubi.tab / pinyin.tab from gen_table.py.
  */
+/* Expose POSIX + BSD symbols (PATH_MAX, setenv, sigaction, forkpty, ...) under
+   -std=c11 on glibc; harmless on macOS/BSD. Must precede all includes. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "table.h"
 #include "tables_embed.h"
 

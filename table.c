@@ -1,4 +1,9 @@
 /* table.c - see table.h. Loads a `.tab` produced by gen_table.py. */
+/* Expose POSIX symbols (mmap, open, fstat, ...) under -std=c11 on glibc. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "table.h"
 
 #include <errno.h>
