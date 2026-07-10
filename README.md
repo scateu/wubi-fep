@@ -1,4 +1,7 @@
-DEMO: <https://asciinema.org/connect/3110f628-32bf-49a0-a032-aecc1ecdd752>
+DEMO: <https://asciinema.org/a/ybRjkiDkExr9qIUA>
+
+
+<img width="1914" height="1130" alt="image" src="https://github.com/user-attachments/assets/774bd9ba-fff7-4d1a-9385-437402f4e514" />
 
 # wubi-ime
 
