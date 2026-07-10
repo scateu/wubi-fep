@@ -484,10 +484,12 @@ def test_vim_mode():
     import signal
     import struct
     import termios
-    # A fake 'vim' on a 24-row screen. On 'i' it prints '-- INSERT --' at the
-    # BOTTOM child row (row 23 = 24-1, where vim's mode message lives); on ESC it
-    # clears that row; on 'B' it prints the literal token in the BODY (row 5) to
-    # simulate the text appearing as file content (must NOT trigger).
+    # A fake 'vim' on a 24-row screen:
+    #   'i' -> '-- INSERT --' at the BOTTOM row col 1 (the real mode message)
+    #   'B' -> the token in the BODY (row 5)                 -> must NOT trigger
+    #   'C' -> ':s/-- INSERT --/x/' on the bottom row, NOT col 1 (a : command)
+    #                                                        -> must NOT trigger
+    #   ESC -> clears the bottom row
     fake = os.path.join(HERE, ".fakevim_test.py")
     with open(fake, "w") as fh:
         fh.write(
@@ -501,6 +503,7 @@ def test_vim_mode():
             "    if not d: break\n"
             "    if d==b'i': os.write(1,b'\\x1b[23;1H-- INSERT --')\n"
             "    elif d==b'B': os.write(1,b'\\x1b[5;1H-- INSERT -- in body')\n"
+            "    elif d==b'C': os.write(1,b'\\x1b[23;1H:s/-- INSERT --/x/')\n"
             "    elif d==b'\\x1b': os.write(1,b'\\x1b[23;1H\\x1b[K')\n"
             "    else: os.write(1,d)\n")
     try:
@@ -510,7 +513,7 @@ def test_vim_mode():
         f.drain(0.3)
         f.send(b"python3 " + fake.encode() + b"\n", settle=0.5)
         f.drain(0.4)
-        f.send(b"i")                   # bottom-row -- INSERT --
+        f.send(b"i")                   # bottom-row col1 -- INSERT --
         check("bottom-row '-- INSERT --' turns IME on",
               last_tag(f.drain_s()) in ("[五]", "[拼]"))
         f.send(b"\x1b")                # leave insert
@@ -520,7 +523,11 @@ def test_vim_mode():
         tags = re.findall(r"\[(?:En|五|拼)\]", f.drain_s())
         check("body-text '-- INSERT --' does NOT switch (stays En)",
               all(t == "[En]" for t in tags))
-        f.send(b"i")                   # bottom-row again
+        f.send(b"C")                   # ':' command line, token not at col 1
+        tags = re.findall(r"\[(?:En|五|拼)\]", f.drain_s())
+        check("':' command '-- INSERT --' (not col 1) does NOT switch",
+              all(t == "[En]" for t in tags))
+        f.send(b"i")                   # bottom-row col1 again
         check("bottom-row '-- INSERT --' again turns IME back on",
               last_tag(f.drain_s()) in ("[五]", "[拼]"))
         f.send(b"\x1b"); f.drain()
@@ -541,7 +548,7 @@ def test_vim_mode():
 
 
 def test_vim_preserve_mode():
-    section("--vim: re-entering insert restores last-used Chinese mode")
+    section("--vim: re-entering insert restores the state you left it in")
     import fcntl
     import signal
     import struct
@@ -561,6 +568,7 @@ def test_vim_preserve_mode():
             "    elif d==b'\\x1b': os.write(1,b'\\x1b[23;1H\\x1b[K')\n"
             "    else: os.write(1,d)\n")
     try:
+        # (a) A CN mode you were using is restored on re-entry.
         f = Fep(args=["--vim"], shell="/bin/sh")
         fcntl.ioctl(f.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         os.kill(f.pid, signal.SIGWINCH)
@@ -573,8 +581,28 @@ def test_vim_preserve_mode():
         f.send(b"\x1b")                    # leave insert -> En
         check("ESC -> En", last_tag(f.drain_s()) == "[En]")
         f.send(b"i")                       # re-enter insert
-        check("re-enter restores 拼 (last used, not default 五)",
+        check("re-enter restores 拼 (was in 拼 when leaving)",
               last_tag(f.drain_s()) == "[拼]")
+        f.send(b"\x1b"); f.drain()
+        f.close()
+
+        # (b) If you manually turn the IME OFF ([En]) while in insert, that is
+        #     remembered: re-entering insert stays [En] (no forced auto-on).
+        f = Fep(args=["--vim"], shell="/bin/sh")
+        fcntl.ioctl(f.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        os.kill(f.pid, signal.SIGWINCH)
+        f.drain(0.3)
+        f.send(b"python3 " + fake.encode() + b"\n", settle=0.5)
+        f.drain(0.4)
+        f.send(b"i"); f.drain()            # insert -> 五
+        f.send(b"\x1c")                    # Ctrl-\: manual -> En (still in insert)
+        check("manual Ctrl-\\ to [En] in insert", last_tag(f.drain_s()) == "[En]")
+        f.send(b"\x1b"); f.drain()         # leave insert (already En)
+        f.send(b"jkdd")                    # normal-mode navigation
+        f.drain(0.2)
+        f.send(b"i")                       # re-enter insert
+        check("re-enter stays [En] (remembered, not forced 五)",
+              last_tag(f.drain_s()) == "[En]")
         f.send(b"\x1b"); f.drain()
         f.close()
     finally:
