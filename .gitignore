@@ -7,3 +7,6 @@
 
 # Auto-generated embedded-table source (produced by gen_embed.py during `make`)
 tables_embed.c
+
+# Transient test helper written by test_wubi_ime.py
+.fakevim_test.py

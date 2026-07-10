@@ -86,6 +86,13 @@ static int        g_wubi_autocommit = 0; /* -a: auto-commit a unique 4-key code 
 #define WANT_PINYIN (1 << 1)
 static int        g_want = WANT_WUBI | WANT_PINYIN;
 
+/* --vim: follow vim's insert mode. We scan the child's output for the literal
+   "-- INSERT --"; when it appears the editor is in insert mode and the IME
+   should be on (a CN mode), when it goes away it should be off ([En]). See
+   vim_scan(). g_vim_insert tracks the last-seen state to switch only on edges. */
+static int        g_vim = 0;
+static int        g_vim_insert = 0;
+
 /* Escape-sequence pass-through state. When an ESC is forwarded to the child in
    a Chinese mode, the rest of the sequence (Meta chords like M-b = ESC b, and
    CSI/SS3 sequences like arrow keys = ESC [ A) must ALSO be forwarded verbatim
@@ -137,13 +144,26 @@ static int child_rows(void)
     return r > 0 ? r : 1;
 }
 
-/* Confine the child to rows 1..child_rows() and park the cursor inside it. */
+/* Confine the child to rows 1..child_rows() and park the cursor inside it.
+   Used at startup / on resize where homing the cursor is fine. */
 static void set_scroll_region(void)
 {
     char buf[64];
     /* DECSTBM: ESC[<top>;<bottom>r  then home the cursor into the region. */
     int p = snprintf(buf, sizeof(buf), "\033[1;%dr\033[%d;1H",
                      child_rows(), child_rows());
+    out_raw(buf, (size_t)p);
+    g_region_set = 1;
+}
+
+/* Re-assert the DECSTBM margin WITHOUT moving the child's cursor. The child's
+   output may contain a clear/reset (ESC[2J, ESC[r, RIS) that drops our margin;
+   we re-apply it after each output chunk. Save/restore the cursor around the
+   DECSTBM so the child's cursor position is untouched. */
+static void assert_scroll_region(void)
+{
+    char buf[64];
+    int p = snprintf(buf, sizeof(buf), "\0337\033[1;%dr\0338", child_rows());
     out_raw(buf, (size_t)p);
     g_region_set = 1;
 }
@@ -193,19 +213,33 @@ static void on_winch(int sig) { (void)sig; g_winch = 1; }
 static void on_child(int sig) { (void)sig; g_child_dead = 1; }
 
 /* ----- candidate bar rendering ----------------------------------------- */
-/* Draw the bar on the last terminal row, preserving the child's cursor. */
+/* UCDOS-inspired status-line palette (ANSI SGR):
+   BAR   - the whole reserved row: black text on light-gray background.
+   TAG   - the mode chip: bright white text on a blue background (like the DOS
+           highlighted field), so [五]/[拼]/[En] stands out.
+   DIM   - a muted note (e.g. "(no match)"): dark-gray text on the gray bar. */
+#define SGR_BAR_ATTR "\033[30;47m" /* black fg, light-gray bg */
+#define SGR_TAG "\033[1;37;44m"    /* bold bright-white fg, blue bg */
+#define SGR_DIM "\033[90;47m"      /* bright-black (gray) fg on gray bg */
+#define SGR_OFF "\033[0m"
+
+/* Draw the bar on the last terminal row, preserving the child's cursor. The
+   whole row is painted gray (UCDOS style): set the bar colours, then ESC[K
+   erases to end-of-line filling with the current background. */
 static void draw_bar(const ime_cand *cands, int ncand)
 {
     char buf[4096];
     int p = 0;
     int rows = term_rows();
 
-    /* Save cursor, go to the reserved last row col 1, clear it. The row is
-       outside the child's scroll region, so the child never disturbs it. */
-    p += snprintf(buf + p, sizeof(buf) - p, "\0337\033[%d;1H\033[2K", rows);
+    /* Save cursor; go to the reserved last row col 1; set the bar palette and
+       clear the whole line with it (ESC[K fills with the current bg colour). */
+    p += snprintf(buf + p, sizeof(buf) - p,
+                  "\0337\033[%d;1H" SGR_BAR_ATTR "\033[K", rows);
 
-    /* Reverse-video tag + the code being typed. */
-    p += snprintf(buf + p, sizeof(buf) - p, "\033[7m%s\033[0m ", MODE_TAG[g_mode]);
+    /* Mode chip in the highlighted (blue) field, then back to the bar palette. */
+    p += snprintf(buf + p, sizeof(buf) - p,
+                  SGR_TAG " %s " SGR_OFF SGR_BAR_ATTR " ", MODE_TAG[g_mode]);
     if (g_code_len)
         p += snprintf(buf + p, sizeof(buf) - p, "%.*s", (int)g_code_len, g_code);
 
@@ -228,11 +262,12 @@ static void draw_bar(const ime_cand *cands, int ncand)
         if (pages > 1)
             p += snprintf(buf + p, sizeof(buf) - p, " (%d/%d)", g_page + 1, pages);
     } else if (g_code_len) {
-        p += snprintf(buf + p, sizeof(buf) - p, "  \033[2m(no match)\033[0m");
+        p += snprintf(buf + p, sizeof(buf) - p, "  " SGR_DIM "(no match)"
+                      SGR_BAR_ATTR);
     }
 
-    /* Restore cursor. */
-    p += snprintf(buf + p, sizeof(buf) - p, "\0338");
+    /* Reset attributes and restore the child's cursor. */
+    p += snprintf(buf + p, sizeof(buf) - p, SGR_OFF "\0338");
     out_raw(buf, (size_t)p);
     g_bar_shown = 1;
 }
@@ -329,6 +364,41 @@ static void toggle_last(void)
     switch_to(target);
 }
 
+/* --vim edges. Entering insert restores the last CN mode (like Ctrl-\ from En);
+   leaving insert drops to En. Both are no-ops if already in the target state,
+   so repeated "-- INSERT --" writes don't fight the user. */
+static void vim_enter_insert(void)
+{
+    if (g_mode == MODE_EN)
+        toggle_last();          /* En -> last CN mode */
+}
+static void vim_leave_insert(void)
+{
+    if (g_mode != MODE_EN)
+        switch_to(MODE_EN);
+}
+
+/* Scan a chunk of child output for vim's "-- INSERT --" mode message. Its
+   presence marks insert mode; on the rising edge we turn the IME on. Leaving
+   insert is driven by the ESC keypress (see process_input), since vim prints no
+   distinctive "left insert" token. */
+static void vim_scan(const unsigned char *buf, size_t n)
+{
+    static const char NEEDLE[] = "-- INSERT --";
+    static const size_t NL = sizeof(NEEDLE) - 1;
+    if (!g_vim || n < NL)
+        return;
+    for (size_t i = 0; i + NL <= n; i++) {
+        if (buf[i] == '-' && memcmp(buf + i, NEEDLE, NL) == 0) {
+            if (!g_vim_insert) {
+                g_vim_insert = 1;
+                vim_enter_insert();
+            }
+            return;
+        }
+    }
+}
+
 /*
  * Handle one input byte in a Chinese mode. Returns 1 if the byte was consumed
  * by the IME, 0 if it should be passed through to the child unchanged.
@@ -423,13 +493,15 @@ static int handle_cn_byte(unsigned char c)
         return 0;
     }
 
-    /* ESC: cancel any pending composition, then pass the ESC through. The
-       process_input state machine forwards the rest of the escape sequence
-       (Meta chords, arrow keys, ...) verbatim so readline/editors see them. */
+    /* ESC: if a composition is pending, ESC cancels it and is SWALLOWED (the
+       user meant "discard these candidates", not "send ESC to the program").
+       With no pending code, ESC passes through so editors/readline see it (and
+       process_input forwards any following escape-sequence bytes verbatim). */
     if (c == KEY_ESC) {
         if (g_code_len > 0) {
             reset_input();
             refresh();
+            return 1;   /* consumed: do not forward */
         }
         return 0;
     }
@@ -498,12 +570,22 @@ static void process_input(const unsigned char *buf, size_t n)
         if (g_mode == MODE_EN) {
             to_child((const char *)&c, 1);
             if (esc_seq) g_esc = ESC_GOT_ESC;
+            /* A bare ESC forwarded to the child while vim is in insert mode
+               means the user is leaving insert -> drop the IME to [En]. */
+            if (c == KEY_ESC && g_vim_insert) {
+                g_vim_insert = 0;
+                vim_leave_insert();
+            }
             continue;
         }
 
         if (handle_cn_byte(c) == 0) {
             to_child((const char *)&c, 1);
             if (esc_seq) g_esc = ESC_GOT_ESC;
+            if (c == KEY_ESC && g_vim_insert) {
+                g_vim_insert = 0;
+                vim_leave_insert();
+            }
         }
     }
 }
@@ -607,7 +689,7 @@ static void load_tables(const char *argv0)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "usage: %s [-s SCHEME] [-a] [-h]\n"
+        "usage: %s [-s SCHEME] [-a] [-V] [-h]\n"
         "  -s, --scheme SCHEME  which tables to load (default: both):\n"
         "                         both    wubi + pinyin\n"
         "                         wubi    wubi only\n"
@@ -615,6 +697,8 @@ static void usage(const char *prog)
         "                       Loading fewer schemes lowers resident memory.\n"
         "  -a, --auto-commit    wubi: auto-commit a full 4-letter code that has a\n"
         "                       single exact match (off by default)\n"
+        "  -V, --vim            follow vim insert mode: turn the IME on when vim\n"
+        "                       shows \"-- INSERT --\", off when you leave insert\n"
         "  -h, --help           show this help\n",
         prog);
 }
@@ -625,6 +709,8 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "-a") || !strcmp(a, "--auto-commit")) {
             g_wubi_autocommit = 1;
+        } else if (!strcmp(a, "-V") || !strcmp(a, "--vim")) {
+            g_vim = 1;
         } else if (!strcmp(a, "-s") || !strcmp(a, "--scheme")) {
             const char *val = (i + 1 < argc) ? argv[++i] : "";
             if (!strcmp(val, "both"))        g_want = WANT_WUBI | WANT_PINYIN;
@@ -722,10 +808,15 @@ int main(int argc, char **argv)
                 if (nr < 0 && errno == EINTR) continue;
                 break; /* child closed the pty */
             }
-            /* The child is confined to the scroll region above the bar row, so
-               its output can't disturb the bar - just pass it through. The bar
-               row is left untouched; only our own draw_bar writes there. */
+            /* The child is confined to the scroll region above the bar row. But
+               its output may contain a clear/reset (ESC[2J, ESC[r, RIS) that
+               drops the DECSTBM margin and/or wipes the reserved row - e.g. the
+               shell's own init on startup. So after passing the output through,
+               re-assert the margin (cursor-preserving) and redraw the bar. */
             out_raw((const char *)ibuf, (size_t)nr);
+            vim_scan(ibuf, (size_t)nr);   /* --vim: follow "-- INSERT --" */
+            assert_scroll_region();
+            refresh();
         }
 
         /* Terminal input -> IME/child. */

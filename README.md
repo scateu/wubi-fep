@@ -1,4 +1,6 @@
-DEMO: <https://asciinema.org/a/ybRjkiDkExr9qIUA>
+DEMO: 
+ - <https://asciinema.org/a/ybRjkiDkExr9qIUA>
+ - Vim: <https://asciinema.org/a/ElvhVDs2w2y1LZnh>
 
 
 <img width="1914" height="1130" alt="image" src="https://github.com/user-attachments/assets/774bd9ba-fff7-4d1a-9385-437402f4e514" />
@@ -11,6 +13,8 @@ Ctrl-@ 切En-拼-五
 
 Ctrl-\切的是@中选的中文方案
 Ctrl-空格 应该也行 没试
+
+./wubi-ime -V #Vim模式，进入根据 -- INSERT -- 和 ESC 和 i 键的状态来自动切换中文
 ```
 
 # wubi-ime
@@ -21,11 +25,12 @@ your shell in a pty and sits transparently in the byte stream, so it works
 inside a **tmux** pane (or any terminal) without needing a system IME.
 
 A status bar on the terminal's bottom line is **always shown** and displays the
-active mode. The bar owns that row exclusively: the wrapped program is confined
-to the rows above it (via a DECSTBM scroll region and a one-row-shorter reported
-size), so a regular terminal simply has **one line less** and the bar never
-flickers or fights the program's output. **Ctrl-@** (a.k.a. Ctrl-Space) cycles
-the mode:
+active mode. It is painted in a UCDOS-style palette — a light-gray bar with the
+mode chip highlighted on blue — and is visible from startup. The bar owns that
+row exclusively: the wrapped program is confined to the rows above it (via a
+DECSTBM scroll region and a one-row-shorter reported size), so a regular terminal
+simply has **one line less** and the bar never flickers or fights the program's
+output. **Ctrl-@** (a.k.a. Ctrl-Space) cycles the mode:
 
 ```
 [En]  English   bytes pass straight through (default)
@@ -92,6 +97,7 @@ Standalone:
 ./wubi-ime -s wubi       # load wubi only (lower memory)
 ./wubi-ime -s pinyin     # load pinyin only
 ./wubi-ime -a            # + wubi auto-commit on a unique 4-letter code
+./wubi-ime -V            # + follow vim insert mode
 ```
 
 Options:
@@ -100,6 +106,7 @@ Options:
 |------|--------|
 | `-s`, `--scheme SCHEME` | Which tables to load: `both` (default), `wubi`, or `pinyin`. The tables are embedded in the binary, so loading fewer schemes doesn't shrink the file — but the unloaded scheme's pages are never faulted in, so it **lowers resident memory**. A scheme not loaded is skipped by the mode toggle. |
 | `-a`, `--auto-commit` | Wubi: auto-commit a full **4-letter** code that has a single exact match, so common words need no `Space`. **Off by default** (a 4-letter code otherwise waits for you to pick with `Space`/a digit). |
+| `-V`, `--vim` | **Follow vim's insert mode.** When vim shows `-- INSERT --`, the IME turns on (your last Chinese mode); when you leave insert (`Esc`), it drops to `[En]` so `j`/`k`/`dd` work normally. Pressing `i`/`a`/`o` reprints `-- INSERT --` and switches back. Off by default. Detected purely from the `-- INSERT --` text and the `Esc` key. |
 | `-h`, `--help` | Show usage. |
 
 Inside tmux — launch it as the pane command:
@@ -138,7 +145,7 @@ export WUBI_IME_DIR=/path/to/custom/tables   # optional override
 | `Backspace` | delete the last code letter |
 | `=` / `.` | next candidate page |
 | `-` / `,` | previous candidate page |
-| `Esc` | cancel the pending code; the Esc (and any following escape sequence) passes through |
+| `Esc` | if candidates are showing, cancel the pending code and **swallow** the Esc (it does not reach the program); with no pending code, the Esc passes through |
 | any other punctuation | commits the first candidate, then the punctuation is sent |
 | Ctrl / Meta / arrow / F-keys | always passed through to the child (see below) |
 
@@ -160,8 +167,10 @@ If you press one of these mid-composition, the pending code is discarded first
 and then the key is forwarded. Only the plain `a`–`z`, digit, `Space`, `Enter`,
 `Backspace`, and paging keys listed above are consumed by the IME.
 
-(A lone `Esc` press cancels the pending code; an `Esc` that is the start of a
-multi-byte key chord is recognised as such and forwarded whole.)
+`Esc` is the exception: while candidates are showing it cancels them and is
+swallowed (you meant "discard these", not "send Esc"). With no pending code it
+passes through, and an `Esc` that begins a multi-byte key chord (arrows, Meta) is
+recognised as such and forwarded whole.
 
 ## Files
 

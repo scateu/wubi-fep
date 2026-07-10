@@ -392,6 +392,111 @@ def test_self_contained():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_gray_bar():
+    section("status bar colour (UCDOS-style gray)")
+    f = Fep()
+    s = f.startup.encode("utf-8", "replace")
+    check("bar painted light-gray bg (SGR 47)", b"47m" in s)
+    check("mode chip on blue bg (SGR 44)", b"44m" in s)
+    check("line filled with bg via ESC[K", b"\x1b[K" in s)
+    f.close()
+
+
+def test_bar_survives_clear():
+    section("status bar survives a child clear/reset")
+    # A child clear (ESC[2J) or margin reset (ESC[r) used to wash out the bar at
+    # startup; the bar must be re-asserted + redrawn after any child output.
+    import fcntl
+    import struct
+    import termios
+    f = Fep(shell="/bin/sh")
+    fcntl.ioctl(f.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    import signal
+    os.kill(f.pid, signal.SIGWINCH)
+    f.drain(0.4)
+    f.send(b"clear\n", settle=0.4)
+    s = f.drain(0.5)
+    lc = max(s.rfind(b"\x1b[2J"), s.rfind(b"\x1b[3J"))
+    tail = s[lc:] if lc >= 0 else s
+    check("scroll region re-asserted after clear", b"\x1b[1;23r" in tail)
+    check("gray bar [En] redrawn after clear",
+          b"47m" in tail and "[En]".encode() in tail)
+    f.close()
+
+
+def test_esc_cancels_candidates():
+    section("ESC cancels candidates (swallowed, not forwarded)")
+    # With a pending composition, ESC must cancel it and NOT reach the child.
+    f = Fep()
+    f.send(b"\x00"); f.send(b"\x00")   # -> 五
+    f.typ("wq")                        # candidates showing
+    f.drain()
+    f.send(b"\x1b")                    # ESC: cancel
+    f.drain()
+    # After cancel the buffer is empty: a fresh code composes from scratch.
+    f.typ("wq")
+    check("ESC cleared the pending code (fresh wq -> 你)", "你" in f.drain_s())
+    f.close()
+
+    # With an EMPTY buffer, ESC still passes through (editor keys keep working).
+    f = Fep(shell="/bin/sh")
+    f.drain(0.3)
+    f.send(b"stty raw -echo; cat\n", settle=0.4); f.drain(0.4)
+    f.send(b"\x00")                    # -> 拼, empty buffer
+    os.write(f.fd, b"\x1b"); time.sleep(0.12)
+    check("empty-buffer ESC passes through", b"\x1b" in f.drain())
+    f.close()
+
+
+def test_vim_mode():
+    section("--vim: follow vim insert mode")
+    # A fake 'vim': prints '-- INSERT --' on 'i', clears it on ESC.
+    fake = os.path.join(HERE, ".fakevim_test.py")
+    with open(fake, "w") as fh:
+        fh.write(
+            "import os,tty\n"
+            "try: tty.setraw(0)\n"
+            "except Exception: pass\n"
+            "os.write(1,b'\\r\\nnormal\\r\\n')\n"
+            "while True:\n"
+            "    try: d=os.read(0,1)\n"
+            "    except OSError: break\n"
+            "    if not d: break\n"
+            "    if d==b'i': os.write(1,b'-- INSERT --')\n"
+            "    elif d==b'\\x1b': os.write(1,b'\\r\\x1b[K[normal]\\r\\n')\n"
+            "    else: os.write(1,d)\n")
+    try:
+        f = Fep(args=["--vim"], shell="/bin/sh")
+        f.drain(0.3)
+        f.send(b"python3 " + fake.encode() + b"\n", settle=0.5)
+        f.drain(0.4)
+        f.send(b"i")                   # fake prints -- INSERT --
+        check("'-- INSERT --' turns IME on",
+              last_tag(f.drain_s()) in ("[五]", "[拼]"))
+        f.send(b"\x1b")                # leave insert
+        check("ESC (leaving insert) turns IME to [En]",
+              last_tag(f.drain_s()) == "[En]")
+        f.send(b"i")                   # -- INSERT -- again
+        check("'-- INSERT --' again turns IME back on",
+              last_tag(f.drain_s()) in ("[五]", "[拼]"))
+        f.send(b"\x1b"); f.drain()
+        f.close()
+
+        # Without --vim, the same needle in output must NOT switch modes.
+        g = Fep()                      # cat child, default (no --vim)
+        g.send(b"-- INSERT --")        # echoed by cat into the stream
+        tags = re.findall(r"\[(?:En|五|拼)\]", g.drain_s())
+        # no mode change => bar not redrawn to a CN tag
+        check("without --vim, '-- INSERT --' does not switch",
+              all(t == "[En]" for t in tags))
+        g.close()
+    finally:
+        try:
+            os.remove(fake)
+        except OSError:
+            pass
+
+
 def main():
     if not os.path.exists(BIN):
         print("wubi-ime not built; run `make` first", file=sys.stderr)
@@ -406,6 +511,10 @@ def main():
     test_scheme_switch()
     test_bottom_line()
     test_self_contained()
+    test_gray_bar()
+    test_bar_survives_clear()
+    test_esc_cancels_candidates()
+    test_vim_mode()
 
     print(f"\n{_pass} passed, {_fail} failed")
     return 1 if _fail else 0
