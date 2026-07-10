@@ -6,7 +6,11 @@ your shell in a pty and sits transparently in the byte stream, so it works
 inside a **tmux** pane (or any terminal) without needing a system IME.
 
 A status bar on the terminal's bottom line is **always shown** and displays the
-active mode. **Ctrl-@** (a.k.a. Ctrl-Space) cycles the mode:
+active mode. The bar owns that row exclusively: the wrapped program is confined
+to the rows above it (via a DECSTBM scroll region and a one-row-shorter reported
+size), so a regular terminal simply has **one line less** and the bar never
+flickers or fights the program's output. **Ctrl-@** (a.k.a. Ctrl-Space) cycles
+the mode:
 
 ```
 [En]  English   bytes pass straight through (default)
@@ -28,12 +32,17 @@ as if you had typed them; the bar shows the code and candidates:
 ## Build
 
 ```sh
-make tables     # generate wubi.tab + pinyin.tab from the rime dictionaries
-make            # build ./wubi-ime
+make            # build ./wubi-ime (generates + embeds the tables automatically)
 ```
 
-The `.tab` tables and build artifacts are git-ignored (derived from the
-committed `*.dict.yaml` sources), so run `make tables` once after cloning.
+`make` regenerates the `.tab` tables from the committed `*.dict.yaml` sources,
+**embeds them into the binary** (`tables_embed.c`), and links everything, so the
+resulting `wubi-ime` is a **single self-contained file** — copy it anywhere and
+run it, no external table files needed. (`make tables` regenerates just the
+`.tab` files if you want them on disk.)
+
+The `.tab` tables, `tables_embed.c`, and build artifacts are all git-ignored
+(derived from the committed sources).
 
 Requirements: a C11 compiler and Python 3 (stdlib only). `forkpty` is used from
 `<util.h>` (macOS/BSD) or `<pty.h>` + `-lutil` (Linux); the Makefile picks the
@@ -68,12 +77,14 @@ or bind a key to open a pane running it:
 bind C-i split-window '/path/to/wubi-ime'
 ```
 
-The tables are located, in order, via `$WUBI_IME_DIR`, then the directory of the
-`wubi-ime` executable, then the current directory. Set `WUBI_IME_DIR` if you
-install the binary and tables to different places:
+The tables are **compiled into the binary**, so nothing else is needed at
+runtime. An external `.tab` still takes precedence *when present*, letting you
+override a table without rebuilding: wubi-ime looks for `wubi.tab` / `pinyin.tab`
+in `$WUBI_IME_DIR`, then the executable's directory, then the current directory,
+and falls back to the embedded copy if none is found.
 
 ```sh
-export WUBI_IME_DIR=/usr/local/share/wubi-ime
+export WUBI_IME_DIR=/path/to/custom/tables   # optional override
 ```
 
 ## Keys
@@ -118,9 +129,11 @@ multi-byte key chord is recognised as such and forwarded whole.)
 
 | File | Purpose |
 |------|---------|
-| `wubi-ime.c` | the FEP: pty wrapper, mode toggle, candidate bar, commit logic |
-| `table.c` / `table.h` | `mmap` + prefix-window binary search over a `.tab` |
+| `wubi-ime.c` | the FEP: pty wrapper, bottom-line reservation, mode toggle, candidate bar, commit logic |
+| `table.c` / `table.h` | table lookup: `mmap` a `.tab` **or** bind an in-memory image; prefix-window binary search |
+| `tables_embed.h` | interface to the tables compiled into the binary |
 | `gen_table.py` | rime `.dict.yaml` → compact `.tab` binary (see file header for format) |
+| `gen_embed.py` | `.tab` files → `tables_embed.c` (byte arrays baked into the binary) |
 | `wubi86.dict.yaml` | rime Wubi 86 source dictionary (input to `gen_table.py`) |
 | `pinyin_simp.dict.yaml` | rime simplified-Pinyin source dictionary |
 | `gen_ime.py` | **unrelated** reference: a different project's firmware-flash IME table generator (GBK, fixed slot). Not used by the FEP. |
@@ -141,10 +154,11 @@ python3 gen_table.py --scheme pinyin --src pinyin_simp.dict.yaml --out pinyin.ta
 
 ## Known limitations (v1)
 
-- The candidate bar uses the terminal's **bottom line** (like `uim-fep`). A
-  full-screen TUI child (vim, less) that also writes the bottom line can briefly
-  fight the bar; it is redrawn after the child writes, but the display can flicker.
-  Inline (at-cursor) rendering is not implemented.
+- The candidate bar uses the terminal's **bottom line** (like `uim-fep`), which
+  is reserved via a scroll region so the wrapped program can't draw on it. This
+  relies on the terminal honouring DECSTBM (`ESC[t;br`) and reporting size via
+  `TIOCGWINSZ` — true of xterm, tmux, iTerm2, and the like. Inline (at-cursor)
+  candidate rendering is not implemented.
 - Shuangpin (Xiaohe) is supported by the generator lineage but not wired into the
   FEP's mode toggle.
 - Key bindings are compile-time constants (no config file yet).

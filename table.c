@@ -19,6 +19,53 @@ static const char MAGIC[4] = {'I', 'M', 'E', 'T'};
 #define HDR_SIZE   16
 #define IDX_SIZE   (IME_INDEX_ENTRIES * 4)
 
+int ime_table_open_mem(ime_table *t, const void *buf, size_t size,
+                       int expect_scheme, const char *name)
+{
+    memset(t, 0, sizeof(*t));
+    if (!name) name = "<memory>";
+
+    if (size < (size_t)HDR_SIZE + IDX_SIZE) {
+        fprintf(stderr, "wubi-ime: %s too small to be a table\n", name);
+        return -1;
+    }
+
+    const uint8_t *b = (const uint8_t *)buf;
+    if (memcmp(b, MAGIC, 4) != 0) {
+        fprintf(stderr, "wubi-ime: %s: bad magic\n", name);
+        return -1;
+    }
+    uint8_t  scheme = b[5];
+    uint32_t count, pool_bytes;
+    memcpy(&count, b + 8, 4);
+    memcpy(&pool_bytes, b + 12, 4);
+
+    size_t need = (size_t)HDR_SIZE + IDX_SIZE
+                + (size_t)count * sizeof(ime_record) + pool_bytes;
+    if (need > size) {
+        fprintf(stderr, "wubi-ime: %s: truncated (need %zu, have %zu)\n",
+                name, need, size);
+        return -1;
+    }
+    if (expect_scheme >= 0 && scheme != expect_scheme) {
+        fprintf(stderr, "wubi-ime: %s: scheme %u, expected %d\n",
+                name, scheme, expect_scheme);
+        return -1;
+    }
+
+    t->base       = b;
+    t->size       = size;
+    t->scheme     = scheme;
+    t->count      = count;
+    t->pool_bytes = pool_bytes;
+    t->index      = (const uint32_t *)(b + HDR_SIZE);
+    t->records    = (const ime_record *)(b + HDR_SIZE + IDX_SIZE);
+    t->pool       = (const char *)(b + HDR_SIZE + IDX_SIZE
+                                     + (size_t)count * sizeof(ime_record));
+    t->owns_map   = 0;
+    return 0;
+}
+
 int ime_table_open(ime_table *t, const char *path, int expect_scheme)
 {
     memset(t, 0, sizeof(*t));
@@ -34,11 +81,6 @@ int ime_table_open(ime_table *t, const char *path, int expect_scheme)
         close(fd);
         return -1;
     }
-    if ((size_t)st.st_size < HDR_SIZE + IDX_SIZE) {
-        fprintf(stderr, "wubi-ime: %s too small to be a table\n", path);
-        close(fd);
-        return -1;
-    }
 
     void *m = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
@@ -47,47 +89,17 @@ int ime_table_open(ime_table *t, const char *path, int expect_scheme)
         return -1;
     }
 
-    const uint8_t *b = (const uint8_t *)m;
-    if (memcmp(b, MAGIC, 4) != 0) {
-        fprintf(stderr, "wubi-ime: %s: bad magic\n", path);
+    if (ime_table_open_mem(t, m, (size_t)st.st_size, expect_scheme, path) != 0) {
         munmap(m, st.st_size);
         return -1;
     }
-    uint8_t  scheme = b[5];
-    uint32_t count, pool_bytes;
-    memcpy(&count, b + 8, 4);
-    memcpy(&pool_bytes, b + 12, 4);
-
-    size_t need = (size_t)HDR_SIZE + IDX_SIZE
-                + (size_t)count * sizeof(ime_record) + pool_bytes;
-    if (need > (size_t)st.st_size) {
-        fprintf(stderr, "wubi-ime: %s: truncated (need %zu, have %lld)\n",
-                path, need, (long long)st.st_size);
-        munmap(m, st.st_size);
-        return -1;
-    }
-    if (expect_scheme >= 0 && scheme != expect_scheme) {
-        fprintf(stderr, "wubi-ime: %s: scheme %u, expected %d\n",
-                path, scheme, expect_scheme);
-        munmap(m, st.st_size);
-        return -1;
-    }
-
-    t->base       = b;
-    t->size       = st.st_size;
-    t->scheme     = scheme;
-    t->count      = count;
-    t->pool_bytes = pool_bytes;
-    t->index      = (const uint32_t *)(b + HDR_SIZE);
-    t->records    = (const ime_record *)(b + HDR_SIZE + IDX_SIZE);
-    t->pool       = (const char *)(b + HDR_SIZE + IDX_SIZE
-                                     + (size_t)count * sizeof(ime_record));
+    t->owns_map = 1;   /* remember to munmap on close */
     return 0;
 }
 
 void ime_table_close(ime_table *t)
 {
-    if (t->base)
+    if (t->base && t->owns_map)
         munmap((void *)t->base, t->size);
     memset(t, 0, sizeof(*t));
 }

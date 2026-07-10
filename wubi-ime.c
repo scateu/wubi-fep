@@ -14,6 +14,7 @@
  * Build: see Makefile.  Tables: wubi.tab / pinyin.tab from gen_table.py.
  */
 #include "table.h"
+#include "tables_embed.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -105,6 +106,48 @@ static void to_child(const char *s, size_t n)
     }
 }
 
+/* ----- bottom-line reservation (DECSTBM scrolling region) -------------- */
+/* The FEP owns the terminal's last row: the child is confined to rows
+   1..rows-1 via a top/bottom scroll margin (DECSTBM) AND is told the screen is
+   one row shorter (winsize.ws_row-1), so the child never scrolls into or draws
+   on the last row. The status bar lives on that reserved row - no flicker. */
+static int g_region_set = 0;
+
+static int term_rows(void)
+{
+    return g_ws.ws_row > 1 ? g_ws.ws_row : 24;
+}
+
+/* Rows visible to the child = terminal rows minus the reserved bar row. */
+static int child_rows(void)
+{
+    int r = term_rows() - 1;
+    return r > 0 ? r : 1;
+}
+
+/* Confine the child to rows 1..child_rows() and park the cursor inside it. */
+static void set_scroll_region(void)
+{
+    char buf[64];
+    /* DECSTBM: ESC[<top>;<bottom>r  then home the cursor into the region. */
+    int p = snprintf(buf, sizeof(buf), "\033[1;%dr\033[%d;1H",
+                     child_rows(), child_rows());
+    out_raw(buf, (size_t)p);
+    g_region_set = 1;
+}
+
+/* Release the reservation: full-screen margin + clear the bar row. */
+static void reset_scroll_region(void)
+{
+    if (!g_region_set)
+        return;
+    char buf[64];
+    /* Reset margin to full screen, move to the (real) last row, clear it. */
+    int p = snprintf(buf, sizeof(buf), "\033[r\033[%d;1H\033[2K", term_rows());
+    out_raw(buf, (size_t)p);
+    g_region_set = 0;
+}
+
 /* ----- terminal setup -------------------------------------------------- */
 static void restore_termios(void)
 {
@@ -143,9 +186,10 @@ static void draw_bar(const ime_cand *cands, int ncand)
 {
     char buf[4096];
     int p = 0;
-    int rows = g_ws.ws_row > 0 ? g_ws.ws_row : 24;
+    int rows = term_rows();
 
-    /* Save cursor, go to last row col 1, clear line. */
+    /* Save cursor, go to the reserved last row col 1, clear it. The row is
+       outside the child's scroll region, so the child never disturbs it. */
     p += snprintf(buf + p, sizeof(buf) - p, "\0337\033[%d;1H\033[2K", rows);
 
     /* Reverse-video tag + the code being typed. */
@@ -179,18 +223,6 @@ static void draw_bar(const ime_cand *cands, int ncand)
     p += snprintf(buf + p, sizeof(buf) - p, "\0338");
     out_raw(buf, (size_t)p);
     g_bar_shown = 1;
-}
-
-/* Erase the bottom bar line, restoring the child's view. */
-static void erase_bar(void)
-{
-    if (!g_bar_shown)
-        return;
-    char buf[64];
-    int rows = g_ws.ws_row > 0 ? g_ws.ws_row : 24;
-    int p = snprintf(buf, sizeof(buf), "\0337\033[%d;1H\033[2K\0338", rows);
-    out_raw(buf, (size_t)p);
-    g_bar_shown = 0;
 }
 
 /* ----- IME editing ----------------------------------------------------- */
@@ -469,14 +501,22 @@ static void sync_winsize(void)
 {
     struct winsize ws;
     if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0) {
-        g_ws = ws;
-        if (g_master >= 0)
-            ioctl(g_master, TIOCSWINSZ, &ws);
+        g_ws = ws;                        /* real terminal size */
+        if (g_master >= 0) {
+            /* Tell the child the screen is one row shorter, reserving the last
+               row for the bar. */
+            struct winsize cws = ws;
+            if (cws.ws_row > 1)
+                cws.ws_row -= 1;
+            ioctl(g_master, TIOCSWINSZ, &cws);
+        }
     }
 }
 
 /* ----- table loading --------------------------------------------------- */
-/* Resolve a table path: $WUBI_IME_DIR/<name>, then next to argv0, then cwd. */
+/* Try to open an external table override at <dir>/<name>. Silent when the file
+   simply does not exist (the embedded copy is the normal case); only a present
+   but malformed file prints a diagnostic (from ime_table_open). */
 static int try_open(ime_table *t, int scheme, const char *dir, const char *name)
 {
     char path[PATH_MAX];
@@ -484,9 +524,30 @@ static int try_open(ime_table *t, int scheme, const char *dir, const char *name)
         snprintf(path, sizeof(path), "%s/%s", dir, name);
     else
         snprintf(path, sizeof(path), "%s", name);
+    if (access(path, R_OK) != 0)
+        return 0;   /* not present here: fall through to the next dir / embedded */
     return ime_table_open(t, path, scheme) == 0 ? 1 : 0;
 }
 
+/* Bind the embedded (compiled-in) table for a scheme, if present. */
+static int load_embedded(ime_table *t, int scheme)
+{
+    for (int i = 0; i < embedded_tables_count; i++) {
+        const embedded_table *e = &embedded_tables[i];
+        if (e->scheme != scheme)
+            continue;
+        if (ime_table_open_mem(t, e->data, e->size, scheme, e->name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * Load both schemes. Tables are compiled into the binary (see gen_embed.py), so
+ * wubi-ime is self-contained and can be copied anywhere. An external .tab still
+ * takes precedence when found via $WUBI_IME_DIR / the exe dir / cwd, so a table
+ * can be overridden without rebuilding.
+ */
 static void load_tables(const char *argv0)
 {
     const char *env = getenv("WUBI_IME_DIR");
@@ -506,16 +567,21 @@ static void load_tables(const char *argv0)
     if (exedir[0])   dirs[nd++] = exedir;
     dirs[nd++] = ".";
 
+    /* External file override first (only when explicitly present). */
     for (int i = 0; i < nd && !g_have_wubi; i++)
         g_have_wubi = try_open(&g_tab_wubi, IME_SCHEME_WUBI, dirs[i], "wubi.tab");
     for (int i = 0; i < nd && !g_have_pinyin; i++)
         g_have_pinyin = try_open(&g_tab_pinyin, IME_SCHEME_PINYIN, dirs[i],
                                  "pinyin.tab");
 
+    /* Fall back to the embedded copies. */
+    if (!g_have_wubi)   g_have_wubi   = load_embedded(&g_tab_wubi,   IME_SCHEME_WUBI);
+    if (!g_have_pinyin) g_have_pinyin = load_embedded(&g_tab_pinyin, IME_SCHEME_PINYIN);
+
     if (!g_have_wubi)
-        fprintf(stderr, "wubi-ime: warning: wubi.tab not found; [五] disabled\n");
+        fprintf(stderr, "wubi-ime: warning: no wubi table; [五] disabled\n");
     if (!g_have_pinyin)
-        fprintf(stderr, "wubi-ime: warning: pinyin.tab not found; [拼] disabled\n");
+        fprintf(stderr, "wubi-ime: warning: no pinyin table; [拼] disabled\n");
 }
 
 /* ----- main ------------------------------------------------------------ */
@@ -547,10 +613,16 @@ int main(int argc, char **argv)
 
     load_tables(argv[0]);
 
-    /* Inherit the current window size for the child pty. */
-    sync_winsize();
+    /* Inherit the current window size; the child gets one row less so the last
+       row stays reserved for the bar. */
+    struct winsize real_ws = { 24, 80, 0, 0 };
+    if (ioctl(STDIN_FILENO, TIOCGWINSZ, &real_ws) == 0)
+        g_ws = real_ws;
+    struct winsize child_ws = g_ws;
+    if (child_ws.ws_row > 1)
+        child_ws.ws_row -= 1;
 
-    pid_t pid = forkpty(&g_master, NULL, NULL, &g_ws);
+    pid_t pid = forkpty(&g_master, NULL, NULL, &child_ws);
     if (pid < 0) {
         perror("wubi-ime: forkpty");
         return 1;
@@ -579,8 +651,9 @@ int main(int argc, char **argv)
     sa.sa_handler = on_child;
     sigaction(SIGCHLD, &sa, NULL);
 
-    /* Draw the always-on status bar immediately, before any input, so [En] is
-       visible from the start. */
+    /* Reserve the last row for the bar (child confined to the rows above) and
+       draw the always-on status bar immediately so [En] shows from the start. */
+    set_scroll_region();
     refresh();
 
     unsigned char ibuf[8192];
@@ -588,6 +661,7 @@ int main(int argc, char **argv)
         if (g_winch) {
             g_winch = 0;
             sync_winsize();
+            set_scroll_region();  /* re-assert margin for the new size */
             refresh();
         }
         if (g_child_dead) {
@@ -613,12 +687,10 @@ int main(int argc, char **argv)
                 if (nr < 0 && errno == EINTR) continue;
                 break; /* child closed the pty */
             }
-            /* If the bar is showing, erasing then re-drawing avoids the child's
-               output landing on top of / scrolling the bar row. */
-            int had_bar = g_bar_shown;
-            if (had_bar) erase_bar();
+            /* The child is confined to the scroll region above the bar row, so
+               its output can't disturb the bar - just pass it through. The bar
+               row is left untouched; only our own draw_bar writes there. */
             out_raw((const char *)ibuf, (size_t)nr);
-            if (had_bar) refresh();   /* bar is always-on, En included */
         }
 
         /* Terminal input -> IME/child. */
@@ -632,7 +704,7 @@ int main(int argc, char **argv)
         }
     }
 
-    erase_bar();
+    reset_scroll_region();   /* release the reserved row + clear it */
     restore_termios();
 
     int status = 0;

@@ -28,6 +28,7 @@ typedef struct {
     const uint32_t  *index;      /* IME_INDEX_ENTRIES prefix lower-bounds */
     const ime_record*records;    /* count records */
     const char      *pool;       /* pool_bytes UTF-8 bytes */
+    int              owns_map;   /* 1 if `base` is an mmap to munmap on close */
 } ime_table;
 
 /* A single candidate returned by a lookup. `word`/`word_len` point into the
@@ -42,6 +43,13 @@ typedef struct {
 
 /* Open/close. Returns 0 on success, -1 on error (errno set / message printed). */
 int  ime_table_open(ime_table *t, const char *path, int expect_scheme);
+
+/* Bind `t` to an already-in-memory table image (e.g. a table compiled into the
+   binary). The buffer must outlive `t` and is NOT freed by ime_table_close.
+   Returns 0 on success, -1 on a malformed image. `name` is used in messages. */
+int  ime_table_open_mem(ime_table *t, const void *buf, size_t size,
+                        int expect_scheme, const char *name);
+
 void ime_table_close(ime_table *t);
 
 /* Fill `out` (capacity `max`) with candidates whose code starts with `query`
