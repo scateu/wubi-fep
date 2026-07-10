@@ -424,6 +424,36 @@ def test_bar_survives_clear():
     f.close()
 
 
+def test_no_escape_split():
+    section("bar re-assert never splits a child escape (vim redraw)")
+    import fcntl
+    import shutil
+    import signal
+    import struct
+    import termios
+    vim = shutil.which("vim") or shutil.which("vi")
+    if not vim:
+        check("vim available (skipped)", True)
+        return
+    f = Fep(shell="/bin/sh", env={"TERM": "xterm-256color"})
+    fcntl.ioctl(f.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    os.kill(f.pid, signal.SIGWINCH)
+    f.drain(0.4)
+    f.send(b"vim\n", settle=1.2)
+    s = f.drain(1.0)
+    # Every injected re-assert (ESC7 ESC[1;23r ESC8) must be preceded by a
+    # COMPLETE child sequence, never a dangling "ESC[<params>" with no final.
+    bad = 0
+    for m in re.finditer(rb"\x1b7\x1b\[1;23r\x1b8", s):
+        before = s[max(0, m.start() - 12):m.start()]
+        if re.search(rb"\x1b\[[0-9;]*$", before):
+            bad += 1
+    check("no re-assert spliced mid-escape during vim redraw", bad == 0)
+    f.send(b"\x1b:q!\n", settle=0.4)
+    f.drain(0.3)
+    f.close()
+
+
 def test_esc_cancels_candidates():
     section("ESC cancels candidates (swallowed, not forwarded)")
     # With a pending composition, ESC must cancel it and NOT reach the child.
@@ -513,6 +543,7 @@ def main():
     test_self_contained()
     test_gray_bar()
     test_bar_survives_clear()
+    test_no_escape_split()
     test_esc_cancels_candidates()
     test_vim_mode()
 

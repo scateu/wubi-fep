@@ -590,6 +590,61 @@ static void process_input(const unsigned char *buf, size_t n)
     }
 }
 
+/* ----- child-output framing -------------------------------------------- */
+/* Return the number of bytes of `buf` (length n) that are safe to write out
+   right now, i.e. NOT ending inside a partial terminal escape sequence. The
+   remainder (a trailing incomplete ESC.../OSC...) should be carried to the next
+   read so our own bar/margin escapes never get spliced into the child's. We
+   recognise the common forms:
+     ESC alone; ESC [ ... (CSI, ends at a byte 0x40-0x7E);
+     ESC ] ... (OSC, ends at BEL or ESC \); ESC <single-char> (2-byte).
+   Anything we don't recognise is treated as complete (emit it). */
+static size_t safe_output_len(const unsigned char *buf, size_t n)
+{
+    /* Scan back from the end for a lone ESC that begins an unfinished seq. */
+    size_t i = n;
+    while (i > 0) {
+        i--;
+        if (buf[i] != 0x1B)
+            continue;
+        /* buf[i] is an ESC; is the sequence starting here complete within n? */
+        size_t j = i + 1;
+        if (j >= n)
+            return i;              /* bare trailing ESC: carry it */
+        unsigned char c = buf[j];
+        if (c == '[' ) {           /* CSI: params until final 0x40-0x7E */
+            j++;
+            while (j < n && !(buf[j] >= 0x40 && buf[j] <= 0x7E))
+                j++;
+            return (j < n) ? n : i; /* found final -> whole buf ok; else carry */
+        }
+        if (c == ']') {            /* OSC: until BEL or ST (ESC \) */
+            j++;
+            while (j < n) {
+                if (buf[j] == 0x07)
+                    return n;
+                if (buf[j] == 0x1B && j + 1 < n && buf[j + 1] == '\\')
+                    return n;
+                j++;
+            }
+            return i;               /* unterminated OSC: carry */
+        }
+        /* Two-byte ESC x sequence: complete iff the byte after ESC exists. */
+        return n;                   /* j<n guaranteed above -> complete */
+    }
+    return n;                       /* no trailing ESC found: all complete */
+}
+
+/* Non-blocking: is there data ready to read on fd right now? */
+static int fd_ready(int fd)
+{
+    fd_set s;
+    FD_ZERO(&s);
+    FD_SET(fd, &s);
+    struct timeval tv = { 0, 0 };
+    return select(fd + 1, &s, NULL, NULL, &tv) > 0 && FD_ISSET(fd, &s);
+}
+
 /* ----- window size ----------------------------------------------------- */
 static void sync_winsize(void)
 {
@@ -777,6 +832,13 @@ int main(int argc, char **argv)
     set_scroll_region();
     refresh();
 
+    /* Child-output carry: bytes of a partial escape sequence at the end of a
+       read are held here and prepended to the next read, so we never write our
+       own bar/margin escapes into the middle of one of the child's sequences
+       (which corrupts full-screen apps like vim). */
+    static unsigned char carry[64];
+    size_t carry_len = 0;
+
     unsigned char ibuf[8192];
     for (;;) {
         if (g_winch) {
@@ -803,20 +865,44 @@ int main(int argc, char **argv)
 
         /* Child output -> terminal. */
         if (FD_ISSET(g_master, &rfds)) {
-            ssize_t nr = read(g_master, ibuf, sizeof(ibuf));
+            /* Prepend any carried partial-escape bytes from last time. */
+            memcpy(ibuf, carry, carry_len);
+            ssize_t nr = read(g_master, ibuf + carry_len, sizeof(ibuf) - carry_len);
             if (nr <= 0) {
                 if (nr < 0 && errno == EINTR) continue;
+                if (carry_len) {          /* flush leftover bytes on EOF */
+                    out_raw((const char *)ibuf, carry_len);
+                    carry_len = 0;
+                }
                 break; /* child closed the pty */
             }
-            /* The child is confined to the scroll region above the bar row. But
-               its output may contain a clear/reset (ESC[2J, ESC[r, RIS) that
-               drops the DECSTBM margin and/or wipes the reserved row - e.g. the
-               shell's own init on startup. So after passing the output through,
-               re-assert the margin (cursor-preserving) and redraw the bar. */
-            out_raw((const char *)ibuf, (size_t)nr);
-            vim_scan(ibuf, (size_t)nr);   /* --vim: follow "-- INSERT --" */
-            assert_scroll_region();
-            refresh();
+            size_t total = carry_len + (size_t)nr;
+            carry_len = 0;
+
+            /* Split off any trailing incomplete escape sequence and carry it. */
+            size_t emit = safe_output_len(ibuf, total);
+            if (emit < total) {
+                size_t rem = total - emit;
+                if (rem > sizeof(carry)) {   /* pathological: don't stall */
+                    emit = total;
+                    rem = 0;
+                }
+                if (rem) {
+                    memcpy(carry, ibuf + emit, rem);
+                    carry_len = rem;
+                }
+            }
+
+            out_raw((const char *)ibuf, emit);
+            vim_scan(ibuf, emit);         /* --vim: follow "-- INSERT --" */
+
+            /* Only re-assert the margin + redraw the bar when the child has gone
+               quiet (nothing more pending). This lands at a burst boundary, not
+               mid-frame, so it never interleaves with the child's redraw. */
+            if (!fd_ready(g_master)) {
+                assert_scroll_region();
+                refresh();
+            }
         }
 
         /* Terminal input -> IME/child. */
