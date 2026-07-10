@@ -1,6 +1,6 @@
 DEMO: 
  - <https://asciinema.org/a/ybRjkiDkExr9qIUA>
- - Vim: <https://asciinema.org/a/ElvhVDs2w2y1LZnh>
+ - Vim: <https://asciinema.org/a/ElvhVDs2w2y1LZnh> \| <https://asciinema.org/a/JzauBlLHOmWr0ZCZ>
 
 
 <img width="1914" height="1130" alt="image" src="https://github.com/user-attachments/assets/774bd9ba-fff7-4d1a-9385-437402f4e514" />
