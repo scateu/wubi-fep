@@ -74,14 +74,17 @@ right link flag from `uname`.
 Standalone:
 
 ```sh
-./wubi-ime            # wraps $SHELL (default /bin/sh)
-./wubi-ime -a         # + wubi auto-commit on a unique 4-letter code
+./wubi-ime               # wraps $SHELL (default /bin/sh), both schemes
+./wubi-ime -s wubi       # load wubi only (lower memory)
+./wubi-ime -s pinyin     # load pinyin only
+./wubi-ime -a            # + wubi auto-commit on a unique 4-letter code
 ```
 
 Options:
 
 | Flag | Effect |
 |------|--------|
+| `-s`, `--scheme SCHEME` | Which tables to load: `both` (default), `wubi`, or `pinyin`. The tables are embedded in the binary, so loading fewer schemes doesn't shrink the file — but the unloaded scheme's pages are never faulted in, so it **lowers resident memory**. A scheme not loaded is skipped by the mode toggle. |
 | `-a`, `--auto-commit` | Wubi: auto-commit a full **4-letter** code that has a single exact match, so common words need no `Space`. **Off by default** (a 4-letter code otherwise waits for you to pick with `Space`/a digit). |
 | `-h`, `--help` | Show usage. |
 

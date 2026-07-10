@@ -80,6 +80,12 @@ static int        g_have_wubi = 0, g_have_pinyin = 0;
 static int        g_bar_shown = 0;   /* is the bottom bar currently drawn? */
 static int        g_wubi_autocommit = 0; /* -a: auto-commit a unique 4-key code */
 
+/* Which schemes to load (--scheme). Bitmask; controls resident memory since an
+   unbound embedded table's pages are never faulted in. Default: both. */
+#define WANT_WUBI   (1 << 0)
+#define WANT_PINYIN (1 << 1)
+static int        g_want = WANT_WUBI | WANT_PINYIN;
+
 /* Escape-sequence pass-through state. When an ESC is forwarded to the child in
    a Chinese mode, the rest of the sequence (Meta chords like M-b = ESC b, and
    CSI/SS3 sequences like arrow keys = ESC [ A) must ALSO be forwarded verbatim
@@ -549,10 +555,12 @@ static int load_embedded(ime_table *t, int scheme)
 }
 
 /*
- * Load both schemes. Tables are compiled into the binary (see gen_embed.py), so
- * wubi-ime is self-contained and can be copied anywhere. An external .tab still
- * takes precedence when found via $WUBI_IME_DIR / the exe dir / cwd, so a table
- * can be overridden without rebuilding.
+ * Load the schemes selected by g_want (--scheme). Tables are compiled into the
+ * binary (see gen_embed.py), so wubi-ime is self-contained and can be copied
+ * anywhere; loading only the wanted scheme(s) keeps the others' pages off the
+ * resident set. An external .tab still takes precedence when found via
+ * $WUBI_IME_DIR / the exe dir / cwd, so a table can be overridden without a
+ * rebuild.
  */
 static void load_tables(const char *argv0)
 {
@@ -573,31 +581,41 @@ static void load_tables(const char *argv0)
     if (exedir[0])   dirs[nd++] = exedir;
     dirs[nd++] = ".";
 
-    /* External file override first (only when explicitly present). */
-    for (int i = 0; i < nd && !g_have_wubi; i++)
-        g_have_wubi = try_open(&g_tab_wubi, IME_SCHEME_WUBI, dirs[i], "wubi.tab");
-    for (int i = 0; i < nd && !g_have_pinyin; i++)
-        g_have_pinyin = try_open(&g_tab_pinyin, IME_SCHEME_PINYIN, dirs[i],
-                                 "pinyin.tab");
-
-    /* Fall back to the embedded copies. */
-    if (!g_have_wubi)   g_have_wubi   = load_embedded(&g_tab_wubi,   IME_SCHEME_WUBI);
-    if (!g_have_pinyin) g_have_pinyin = load_embedded(&g_tab_pinyin, IME_SCHEME_PINYIN);
-
-    if (!g_have_wubi)
-        fprintf(stderr, "wubi-ime: warning: no wubi table; [五] disabled\n");
-    if (!g_have_pinyin)
-        fprintf(stderr, "wubi-ime: warning: no pinyin table; [拼] disabled\n");
+    /* External file override first (only when explicitly present), then the
+       embedded copy - but only for the scheme(s) requested. */
+    if (g_want & WANT_WUBI) {
+        for (int i = 0; i < nd && !g_have_wubi; i++)
+            g_have_wubi = try_open(&g_tab_wubi, IME_SCHEME_WUBI, dirs[i],
+                                   "wubi.tab");
+        if (!g_have_wubi)
+            g_have_wubi = load_embedded(&g_tab_wubi, IME_SCHEME_WUBI);
+        if (!g_have_wubi)
+            fprintf(stderr, "wubi-ime: warning: no wubi table; [五] disabled\n");
+    }
+    if (g_want & WANT_PINYIN) {
+        for (int i = 0; i < nd && !g_have_pinyin; i++)
+            g_have_pinyin = try_open(&g_tab_pinyin, IME_SCHEME_PINYIN, dirs[i],
+                                     "pinyin.tab");
+        if (!g_have_pinyin)
+            g_have_pinyin = load_embedded(&g_tab_pinyin, IME_SCHEME_PINYIN);
+        if (!g_have_pinyin)
+            fprintf(stderr, "wubi-ime: warning: no pinyin table; [拼] disabled\n");
+    }
 }
 
 /* ----- main ------------------------------------------------------------ */
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "usage: %s [-a] [-h]\n"
-        "  -a, --auto-commit   wubi: auto-commit a full 4-letter code that has a\n"
-        "                      single exact match (off by default)\n"
-        "  -h, --help          show this help\n",
+        "usage: %s [-s SCHEME] [-a] [-h]\n"
+        "  -s, --scheme SCHEME  which tables to load (default: both):\n"
+        "                         both    wubi + pinyin\n"
+        "                         wubi    wubi only\n"
+        "                         pinyin  pinyin only\n"
+        "                       Loading fewer schemes lowers resident memory.\n"
+        "  -a, --auto-commit    wubi: auto-commit a full 4-letter code that has a\n"
+        "                       single exact match (off by default)\n"
+        "  -h, --help           show this help\n",
         prog);
 }
 
@@ -607,6 +625,17 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "-a") || !strcmp(a, "--auto-commit")) {
             g_wubi_autocommit = 1;
+        } else if (!strcmp(a, "-s") || !strcmp(a, "--scheme")) {
+            const char *val = (i + 1 < argc) ? argv[++i] : "";
+            if (!strcmp(val, "both"))        g_want = WANT_WUBI | WANT_PINYIN;
+            else if (!strcmp(val, "wubi"))   g_want = WANT_WUBI;
+            else if (!strcmp(val, "pinyin")) g_want = WANT_PINYIN;
+            else {
+                fprintf(stderr, "wubi-ime: --scheme wants both|wubi|pinyin, "
+                        "got '%s'\n", val);
+                usage(argv[0]);
+                return 2;
+            }
         } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
             usage(argv[0]);
             return 0;
