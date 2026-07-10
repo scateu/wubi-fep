@@ -17,7 +17,7 @@ BIN  = wubi-ime
 
 TABLES = wubi.tab pinyin.tab
 
-.PHONY: all tables clean distclean
+.PHONY: all tables test clean distclean
 
 all: $(BIN)
 
@@ -46,6 +46,11 @@ wubi.tab: gen_table.py wubi86.dict.yaml
 
 pinyin.tab: gen_table.py pinyin_simp.dict.yaml
 	$(PYTHON) gen_table.py --scheme pinyin --src pinyin_simp.dict.yaml --out $@
+
+# Run the test suite (table decode + pty-driven FEP tests). Needs the binary
+# and the .tab files (the table layer decodes them directly).
+test: $(BIN) $(TABLES)
+	$(PYTHON) test_wubi_ime.py
 
 clean:
 	rm -f $(OBJS) $(BIN) tables_embed.c

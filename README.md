@@ -69,6 +69,20 @@ Requirements: a C11 compiler and Python 3 (stdlib only). `forkpty` is used from
 `<util.h>` (macOS/BSD) or `<pty.h>` + `-lutil` (Linux); the Makefile picks the
 right link flag from `uname`.
 
+## Test
+
+```sh
+make test       # build if needed, then run the suite
+```
+
+`test_wubi_ime.py` covers two layers: it decodes the `.tab` files in Python to
+check the binary format / prefix index / ranking, and it drives the built
+`wubi-ime` through a pty to check mode toggles, wubi & pinyin (single + phrase)
+input and commits, the `-a` auto-commit switch, readline/Meta/arrow key
+pass-through, `--scheme` selection, the reserved bottom line (scroll region +
+one-row-shorter child), and that the embedded tables work with no external
+`.tab`. `make test` exits nonzero if anything fails.
+
 ## Run
 
 Standalone:
@@ -158,6 +172,7 @@ multi-byte key chord is recognised as such and forwarded whole.)
 | `tables_embed.h` | interface to the tables compiled into the binary |
 | `gen_table.py` | rime `.dict.yaml` → compact `.tab` binary (see file header for format) |
 | `gen_embed.py` | `.tab` files → `tables_embed.c` (byte arrays baked into the binary) |
+| `test_wubi_ime.py` | test suite (`make test`): `.tab` decode + pty-driven FEP tests |
 | `wubi86.dict.yaml` | rime Wubi 86 source dictionary (input to `gen_table.py`) |
 | `pinyin_simp.dict.yaml` | rime simplified-Pinyin source dictionary |
 
