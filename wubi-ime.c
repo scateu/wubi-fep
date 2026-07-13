@@ -552,15 +552,17 @@ static int handle_cn_byte(unsigned char c)
         return 1;
     }
 
-    /* Enter with a pending buffer commits the first candidate; otherwise the
-       Enter passes through. */
+    /* Enter with a pending buffer: send the RAW typed letters to the child (not
+       any candidate), clear the composition, and SWALLOW the Enter. This holds
+       whether or not candidates are showing - e.g. "wqwu" (你们/您们 in the bar)
+       + Enter puts the literal "wqwu" on screen, no newline. Empty buffer: Enter
+       passes through unchanged. */
     if (c == KEY_CR || c == KEY_LF) {
-        int n = lookup_cur(cands);
         if (g_code_len > 0) {
-            if (n > 0) commit(cands, g_page * PAGE);
-            else       reset_input();
+            to_child(g_code, (size_t)g_code_len);
+            reset_input();
             refresh();
-            return 1;
+            return 1;   /* consumed: the Enter is NOT forwarded */
         }
         return 0;
     }

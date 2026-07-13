@@ -478,6 +478,40 @@ def test_esc_cancels_candidates():
     f.close()
 
 
+def test_enter_flushes_english():
+    section("Enter flushes the raw typed buffer as english")
+    # In CN mode, Enter with a pending buffer must send the RAW letters (not a
+    # candidate) to the child and SWALLOW the Enter - whether or not candidates
+    # are showing.
+    f = Fep(shell="/bin/sh")
+    f.drain(0.3)
+    f.send(b"stty raw -echo; cat\n", settle=0.4); f.drain(0.4)
+
+    # (a) no candidates: 'zzzz' composes nothing in pinyin.
+    f.send(b"\x00")                    # -> 拼 (pinyin), empty buffer
+    f.drain()
+    f.typ("zzzz")
+    f.drain()
+    os.write(f.fd, b"\r"); time.sleep(0.15)
+    out = f.drain()
+    check("no-candidate buffer flushed as english", b"zzzz" in out)
+    check("Enter swallowed (no newline forwarded)",
+          b"\r" not in out and b"\n" not in out)
+
+    # (b) WITH candidates: 'wqwu' shows 你们/您们 in wubi, Enter emits 'wqwu'.
+    f.send(b"\x00")                    # -> 五 (wubi)
+    f.drain()
+    f.typ("wqwu")                      # candidates in the bar
+    f.drain()
+    os.write(f.fd, b"\r"); time.sleep(0.15)
+    out = f.drain()
+    check("candidate buffer flushed as raw letters, not hanzi", b"wqwu" in out)
+    check("no hanzi committed on Enter", "你们" not in out.decode("utf-8", "replace"))
+    check("Enter swallowed with candidates too",
+          b"\r" not in out and b"\n" not in out)
+    f.close()
+
+
 def test_vim_mode():
     section("--vim: follow vim insert mode")
     import fcntl
@@ -630,6 +664,7 @@ def main():
     test_bar_survives_clear()
     test_no_escape_split()
     test_esc_cancels_candidates()
+    test_enter_flushes_english()
     test_vim_mode()
     test_vim_preserve_mode()
 
